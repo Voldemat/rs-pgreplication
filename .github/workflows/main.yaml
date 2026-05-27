@@ -20,9 +20,14 @@ jobs:
       run: cargo build --profile ${{ matrix.BUILD_TARGET }}
     - name: Run tests in "${{ matrix.BUILD_TARGET }}" mode
       run: cargo test --profile ${{ matrix.BUILD_TARGET }}
+    - uses: rust-lang/crates-io-auth-action@v1
+      id: auth
+      if: github.ref_type == 'tag'
     - name: Publish crate
       if: github.ref_type == 'tag'
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
       run: |
-        cargo install cargo-edit
-        cargo set-version ${{ github.ref_name }}
+        sed -i 's/0.0.1/${{ github.ref_name }}/g' Cargo.toml
+        sed -i 's/0.0.1/${{ github.ref_name }}/g' Cargo.lock
         cargo publish
