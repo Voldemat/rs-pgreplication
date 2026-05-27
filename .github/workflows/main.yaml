@@ -30,4 +30,4 @@ jobs:
       run: |
         sed -i 's/0.0.1/${{ github.ref_name }}/g' Cargo.toml
         sed -i 's/0.0.1/${{ github.ref_name }}/g' Cargo.lock
-        cargo publish
+        cargo publish --allow-dirty
