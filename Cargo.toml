@@ -1,6 +1,9 @@
 [package]
 name = "pgreplication"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
+license = "MIT"
+description = "Library for parsing pgreplication messages"
+repository = "https://github.com/Voldemat/rs-pgreplication"
 
 [dependencies]
