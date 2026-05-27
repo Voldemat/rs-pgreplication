@@ -1,0 +1,6 @@
+[package]
+name = "pgreplication"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
