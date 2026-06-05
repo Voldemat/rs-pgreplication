@@ -5,6 +5,18 @@ pub enum PrimaryEventType {
     PrimaryKeepaliveMessage = b'k',
 }
 
+impl PrimaryEventType {
+    pub fn from_char(c: u8) -> Option<PrimaryEventType> {
+        if c == PrimaryEventType::XLogData as u8 {
+            Some(PrimaryEventType::XLogData)
+        } else if c == PrimaryEventType::PrimaryKeepaliveMessage as u8 {
+            Some(PrimaryEventType::PrimaryKeepaliveMessage)
+        } else {
+            None
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum StandbyEventType {
@@ -25,21 +37,21 @@ impl StandbyEventType {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct XLogData<'a> {
+pub struct XLogData {
     pub message_wal_start: i64,
     pub server_wal_end: i64,
     pub sent_at_unix_timestamp: i64,
-    pub wal_data: &'a [u8],
+    pub wal_data: Vec<u8>,
 }
 
-impl<'a> XLogData<'a> {
+impl XLogData {
     pub const MIN_SIZE: usize = std::mem::size_of::<i64>() * 3;
 
     pub fn get_network_buffer_size(self: &Self) -> usize {
         Self::MIN_SIZE + self.wal_data.len()
     }
 
-    pub fn to_network_buffer(self: &Self, buffer: &'a mut [u8]) {
+    pub fn to_network_buffer(self: &Self, buffer: &mut [u8]) {
         assert!(buffer.len() == self.get_network_buffer_size());
         buffer[0..8].copy_from_slice(&self.message_wal_start.to_be_bytes());
         buffer[8..16].copy_from_slice(&self.server_wal_end.to_be_bytes());
@@ -47,12 +59,10 @@ impl<'a> XLogData<'a> {
             .copy_from_slice(&self.sent_at_unix_timestamp.to_be_bytes());
 
         // Append the wal_data payload
-        buffer[24..24 + self.wal_data.len()].copy_from_slice(self.wal_data);
+        buffer[24..24 + self.wal_data.len()].copy_from_slice(&self.wal_data);
     }
 
-    pub fn from_network_buffer(
-        buffer: &'a [u8],
-    ) -> Result<XLogData<'a>, String> {
+    pub fn from_network_buffer(buffer: &[u8]) -> Result<XLogData, String> {
         if buffer.len() < Self::MIN_SIZE {
             return Err(format!(
                 "Buffer too small. Expected at least {} bytes, got {}",
@@ -71,7 +81,7 @@ impl<'a> XLogData<'a> {
             sent_at_unix_timestamp: i64::from_be_bytes(
                 buffer[16..24].try_into().unwrap(),
             ),
-            wal_data: &buffer[24..],
+            wal_data: buffer[24..].to_vec(),
         })
     }
 }
@@ -193,9 +203,42 @@ impl HotStandbyFeedbackMessage {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum PrimaryEvent<'a> {
-    XLogData(XLogData<'a>),
+pub enum PrimaryEvent {
+    XLogData(XLogData),
     PrimaryKeepaliveMessage(PrimaryKeepaliveMessage),
+}
+
+impl PrimaryEvent {
+    pub fn to_network_buffer(event: &PrimaryEvent) -> Vec<u8> {
+        match event {
+            PrimaryEvent::XLogData(xlogdata) => {
+                x_log_data_to_network_buffer(xlogdata)
+            }
+            PrimaryEvent::PrimaryKeepaliveMessage(
+                primary_keepalive_message,
+            ) => primary_keepalive_message_to_network_buffer(
+                primary_keepalive_message,
+            )
+            .to_vec(),
+        }
+    }
+
+    pub fn from_network_buffer(buffer: &[u8]) -> Result<PrimaryEvent, String> {
+        let event_type = PrimaryEventType::from_char(buffer[0])
+            .ok_or_else(|| "Failed to parse PrimaryEventType".to_string())?;
+        match event_type {
+            PrimaryEventType::XLogData => {
+                XLogData::from_network_buffer(&buffer[1..])
+                    .map(|xlogdata| PrimaryEvent::XLogData(xlogdata))
+            }
+            PrimaryEventType::PrimaryKeepaliveMessage => {
+                PrimaryKeepaliveMessage::from_network_buffer(
+                    &buffer[1..].try_into().unwrap(),
+                )
+                .map(|message| PrimaryEvent::PrimaryKeepaliveMessage(message))
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -215,6 +258,54 @@ impl StandbyEvent {
             }
         }
     }
+
+    pub fn from_network_buffer(buffer: &[u8]) -> Result<StandbyEvent, String> {
+        let event_type =
+            StandbyEventType::from_char(buffer[0]).ok_or_else(|| {
+                format!("Unexpected StandbyEventType: {}", buffer[0])
+            })?;
+
+        let event_buffer = &buffer[1..];
+
+        match event_type {
+            StandbyEventType::StandbyStatusUpdate => {
+                standby_status_update_from_network_buffer(event_buffer)
+                    .map(|e| StandbyEvent::StandbyStatusUpdate(e))
+            }
+            StandbyEventType::HotStandbyFeedbackMessage => {
+                hot_standby_feedback_message_from_network_buffer(event_buffer)
+                    .map(|e| StandbyEvent::HotStandbyFeedbackMessage(e))
+            }
+        }
+    }
+}
+
+pub fn hot_standby_feedback_message_from_network_buffer(
+    buffer: &[u8],
+) -> Result<HotStandbyFeedbackMessage, String> {
+    if buffer.len() != HotStandbyFeedbackMessage::SIZE {
+        return Err(format!(
+            "HotStandbyFeedbackMessage buffer size must be equal to {}",
+            HotStandbyFeedbackMessage::SIZE
+        ));
+    }
+    let fixed_buf: &[u8; HotStandbyFeedbackMessage::SIZE] =
+        buffer.try_into().unwrap();
+    Ok(HotStandbyFeedbackMessage::from_network_buffer(fixed_buf))
+}
+
+pub fn standby_status_update_from_network_buffer(
+    buffer: &[u8],
+) -> Result<StandbyStatusUpdate, String> {
+    if buffer.len() != StandbyStatusUpdate::SIZE {
+        return Err(format!(
+            "StandbyStatusUpdate buffer size must be equal to {}",
+            StandbyStatusUpdate::SIZE
+        ));
+    }
+    let fixed_buf: &[u8; StandbyStatusUpdate::SIZE] =
+        buffer.try_into().unwrap();
+    Ok(StandbyStatusUpdate::from_network_buffer(fixed_buf))
 }
 
 pub fn primary_keepalive_message_to_network_buffer(
@@ -236,68 +327,6 @@ pub fn x_log_data_to_network_buffer(data: &XLogData) -> Vec<u8> {
     buffer[0] = PrimaryEventType::XLogData as u8;
     data.to_network_buffer(&mut buffer[1..]);
     buffer
-}
-
-pub fn primary_event_to_network_buffer(event: &PrimaryEvent) -> Vec<u8> {
-    match event {
-        PrimaryEvent::PrimaryKeepaliveMessage(msg) => {
-            primary_keepalive_message_to_network_buffer(msg).to_vec()
-        }
-        PrimaryEvent::XLogData(data) => x_log_data_to_network_buffer(data),
-    }
-}
-
-pub fn standby_event_type_from_char(c: u8) -> Option<StandbyEventType> {
-    if c == StandbyEventType::StandbyStatusUpdate as u8 {
-        Some(StandbyEventType::StandbyStatusUpdate)
-    } else if c == StandbyEventType::HotStandbyFeedbackMessage as u8 {
-        Some(StandbyEventType::HotStandbyFeedbackMessage)
-    } else {
-        None
-    }
-}
-
-pub fn standby_event_from_network_buffer(
-    buffer: &[u8],
-) -> Result<StandbyEvent, String> {
-    if buffer.is_empty() {
-        return Err("Empty buffer".to_string());
-    }
-
-    let type_char = buffer[0];
-    let event_type = standby_event_type_from_char(type_char)
-        .ok_or_else(|| format!("Unexpected type: {}", type_char))?;
-
-    let event_buffer = &buffer[1..];
-
-    match event_type {
-        StandbyEventType::StandbyStatusUpdate => {
-            if event_buffer.len() != StandbyStatusUpdate::SIZE {
-                return Err(format!(
-                    "StandbyStatusUpdate buffer size must be equal to {}",
-                    StandbyStatusUpdate::SIZE
-                ));
-            }
-            let fixed_buf: &[u8; StandbyStatusUpdate::SIZE] =
-                event_buffer.try_into().unwrap();
-            Ok(StandbyEvent::StandbyStatusUpdate(
-                StandbyStatusUpdate::from_network_buffer(fixed_buf),
-            ))
-        }
-        StandbyEventType::HotStandbyFeedbackMessage => {
-            if event_buffer.len() != HotStandbyFeedbackMessage::SIZE {
-                return Err(format!(
-                    "HotStandbyFeedbackMessage buffer size must be equal to {}",
-                    HotStandbyFeedbackMessage::SIZE
-                ));
-            }
-            let fixed_buf: &[u8; HotStandbyFeedbackMessage::SIZE] =
-                event_buffer.try_into().unwrap();
-            Ok(StandbyEvent::HotStandbyFeedbackMessage(
-                HotStandbyFeedbackMessage::from_network_buffer(fixed_buf),
-            ))
-        }
-    }
 }
 
 pub fn standby_status_update_to_network_buffer(
